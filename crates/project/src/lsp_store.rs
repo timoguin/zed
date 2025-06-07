@@ -4692,8 +4692,8 @@ impl LspStore {
                 }
                 rebase.finish()
             });
-            for (id, name) in to_stop {
-                self.stop_local_language_server(id, name, cx).detach();
+            for (id, _) in to_stop {
+                self.stop_local_language_server(id, cx).detach();
             }
         }
     }
@@ -8854,11 +8854,8 @@ impl LspStore {
 
                 select! {
                     server = startup.fuse() => server,
-                    _ = timer => {
-                        log::info!(
-                            "timeout waiting for language server {} to finish launching before stopping",
-                            name
-                        );
+                    () = timer => {
+                        log::info!("timeout waiting for language server {name} to finish launching before stopping");
                         None
                     },
                 }
@@ -8881,8 +8878,6 @@ impl LspStore {
     fn stop_local_language_server(
         &mut self,
         server_id: LanguageServerId,
-        // TODO kb remove this name
-        name: LanguageServerName,
         cx: &mut Context<Self>,
     ) -> Task<Vec<WorktreeId>> {
         let local = match &mut self.mode {
@@ -8892,7 +8887,7 @@ impl LspStore {
             }
         };
 
-        let mut orphaned_worktrees = vec![];
+        let mut orphaned_worktrees = Vec::new();
         // Remove this server ID from all entries in the given worktree.
         local.language_server_ids.retain(|(worktree, _), ids| {
             if !ids.remove(&server_id) {
@@ -8906,8 +8901,6 @@ impl LspStore {
                 true
             }
         });
-        let _ = self.language_server_statuses.remove(&server_id);
-        log::info!("stopping language server {name}");
         self.buffer_store.update(cx, |buffer_store, cx| {
             for buffer in buffer_store.buffers() {
                 buffer.update(cx, |buffer, cx| {
@@ -8953,22 +8946,45 @@ impl LspStore {
             });
         }
         local.language_server_watched_paths.remove(&server_id);
+
         let server_state = local.language_servers.remove(&server_id);
-        cx.notify();
-        cx.emit(LspStoreEvent::LanguageServerUpdate {
-            language_server_id: server_id,
-            name: Some(name.clone()),
-            message: proto::update_language_server::Variant::StatusUpdate(proto::StatusUpdate {
-                message: None,
-                status: proto::status_update::Status::Stopped as i32,
-            }),
-        });
         self.remove_result_ids(server_id);
-        cx.emit(LspStoreEvent::LanguageServerRemoved(server_id));
-        cx.spawn(async move |_, cx| {
-            Self::shutdown_language_server(server_state, name, cx).await;
-            orphaned_worktrees
-        })
+        let name = self
+            .language_server_statuses
+            .remove(&server_id)
+            .map(|status| LanguageServerName::from(status.name.as_str()))
+            .or_else(|| {
+                if let Some(LanguageServerState::Running { adapter, .. }) = server_state.as_ref() {
+                    Some(adapter.name())
+                } else {
+                    None
+                }
+            });
+
+        if let Some(name) = name {
+            log::info!("stopping language server {name}");
+            cx.notify();
+            cx.emit(LspStoreEvent::LanguageServerUpdate {
+                language_server_id: server_id,
+                name: Some(name.clone()),
+                message: proto::update_language_server::Variant::StatusUpdate(
+                    proto::StatusUpdate {
+                        message: None,
+                        status: proto::status_update::Status::Stopped as i32,
+                    },
+                ),
+            });
+            cx.emit(LspStoreEvent::LanguageServerRemoved(server_id));
+            return cx.spawn(async move |_, cx| {
+                Self::shutdown_language_server(server_state, name, cx).await;
+                orphaned_worktrees
+            });
+        }
+
+        if server_state.is_some() {
+            cx.emit(LspStoreEvent::LanguageServerRemoved(server_id));
+        }
+        Task::ready(orphaned_worktrees)
     }
 
     pub fn restart_language_servers_for_buffers(
@@ -9057,14 +9073,7 @@ impl LspStore {
         });
         let tasks = language_servers_to_stop
             .into_iter()
-            .map(|server| {
-                let name = self
-                    .language_server_statuses
-                    .get(&server)
-                    .map(|state| state.name.as_str().into())
-                    .unwrap_or_else(|| LanguageServerName::from("Unknown"));
-                self.stop_local_language_server(server, name, cx)
-            })
+            .map(|server| self.stop_local_language_server(server, cx))
             .collect::<Vec<_>>();
 
         cx.background_spawn(futures::future::join_all(tasks).map(|_| ()))
@@ -9309,12 +9318,10 @@ impl LspStore {
         cx.emit(LspStoreEvent::LanguageServerUpdate {
             language_server_id: server_id,
             name: Some(adapter.name()),
-            message: proto::update_language_server::Variant::StatusUpdate(
-                proto::StatusUpdate {
-                    message: None,
-                    status: proto::status_update::Status::Running as i32,
-                },
-            ),
+            message: proto::update_language_server::Variant::StatusUpdate(proto::StatusUpdate {
+                message: None,
+                status: proto::status_update::Status::Running as i32,
+            }),
         });
         if let Some(file_ops_caps) = language_server
             .capabilities()
@@ -10503,7 +10510,6 @@ pub enum LanguageServerState {
         simulate_disk_based_diagnostics_completion: Option<Task<()>>,
         workspace_refresh_task: Option<(mpsc::Sender<()>, Task<()>)>,
     },
-    // TODO kb add stopped
 }
 
 impl LanguageServerState {
