@@ -1405,6 +1405,7 @@ fn reload_keymaps(cx: &mut App, user_key_bindings: Vec<KeyBinding>) {
         "New Window",
         workspace::NewWindow,
     )]);
+    settings_ui::keybindings::KeymapEventChannel::trigger_keymap_changed(cx);
 }
 
 pub fn load_default_keymap(cx: &mut App) {
