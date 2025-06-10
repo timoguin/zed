@@ -14407,12 +14407,14 @@ name = "settings_ui"
 version = "0.1.0"
 dependencies = [
  "command_palette_hooks",
+ "db",
  "editor",
  "feature_flags",
  "fs",
  "gpui",
  "log",
  "paths",
+ "project",
  "schemars",
  "serde",
  "settings",
@@ -16886,6 +16888,7 @@ dependencies = [
  "gpui_macros",
  "icons",
  "itertools 0.14.0",
+ "log",
  "menu",
  "serde",
  "settings",
