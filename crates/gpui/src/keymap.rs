@@ -314,11 +314,11 @@ impl KeyBindingSource {
     }
 }
 
+type Hash = u64;
 /// A registry of key binding sources.
 #[derive(Debug, Clone, Default)]
 pub struct KeyBindingSourceRegistry {
-    sources: Vec<KeyBindingSource>,
-    hashes: Vec<u64>,
+    sources: Vec<(KeyBindingSource, Hash)>,
 }
 
 impl KeyBindingSourceRegistry {
@@ -328,21 +328,20 @@ impl KeyBindingSourceRegistry {
         source.hash(&mut hasher);
         let source_hash = hasher.finish();
 
-        for (i, hash) in self.hashes.iter().enumerate() {
+        for (i, (old_source, hash)) in self.sources.iter_mut().enumerate() {
             if *hash == source_hash {
-                self.sources[i] = source;
+                *old_source = source;
                 return KeyBindingSourceIndex(i as u32);
             }
         }
         let index = self.sources.len();
-        self.sources.push(source);
-        self.hashes.push(source_hash);
+        self.sources.push((source, source_hash));
         KeyBindingSourceIndex(index as u32)
     }
 
     /// Returns a reference to the key binding source for the given source index.
     pub fn get(&self, index: KeyBindingSourceIndex) -> &KeyBindingSource {
-        &self.sources[index.0 as usize]
+        &self.sources[index.0 as usize].0
     }
 }
 
