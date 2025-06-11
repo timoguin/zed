@@ -90,6 +90,7 @@ impl KeymapEditor {
     fn process_bindings(cx: &mut Context<Self>) -> Vec<ProcessedKeybinding> {
         let key_bindings_ptr = cx.key_bindings();
         let lock = key_bindings_ptr.borrow();
+        let sources = lock.sources();
         let key_bindings = lock.bindings();
 
         let mut processed_bindings = Vec::new();
@@ -106,10 +107,15 @@ impl KeymapEditor {
                 .map(|predicate| predicate.to_string())
                 .unwrap_or_else(|| "<global>".to_string());
 
+            let source = key_binding
+                .source()
+                .map(|source| sources.get(source).name().clone());
+
             processed_bindings.push(ProcessedKeybinding {
                 keystroke_text: keystroke_text.into(),
                 action: key_binding.action().name().into(),
                 context: context.into(),
+                source,
             })
         }
         processed_bindings
@@ -120,6 +126,7 @@ struct ProcessedKeybinding {
     keystroke_text: SharedString,
     action: SharedString,
     context: SharedString,
+    source: Option<SharedString>,
 }
 
 impl Item for KeymapEditor {
@@ -148,7 +155,7 @@ impl Render for KeymapEditor {
             .child(
                 Table::new()
                     .interactable(&self.table_interaction_state)
-                    .header(["Command", "Keystrokes", "Context"])
+                    .header(["Command", "Keystrokes", "Context", "Source"])
                     .uniform_list(
                         "keymap-editor-table",
                         row_count,
@@ -160,8 +167,7 @@ impl Render for KeymapEditor {
                                         binding.action.clone(),
                                         binding.keystroke_text.clone(),
                                         binding.context.clone(),
-                                        // TODO: Add a source field
-                                        // binding.source.clone(),
+                                        binding.source.clone().unwrap_or_default(),
                                     ];
 
                                     // fixme: pass through callback as a row_cx param
