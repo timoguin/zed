@@ -223,12 +223,14 @@ impl DapStore {
                 })
             }
             DapStoreMode::Ssh(ssh) => {
-                let request = ssh.upstream_client.request(proto::GetDebugAdapterBinary {
-                    session_id: session_id.to_proto(),
-                    project_id: ssh.upstream_project_id,
-                    worktree_id: worktree.read(cx).id().to_proto(),
-                    definition: Some(definition.to_proto()),
-                });
+                let request = ssh
+                    .upstream_client
+                    .request(dbg!(proto::GetDebugAdapterBinary {
+                        session_id: session_id.to_proto(),
+                        project_id: ssh.upstream_project_id,
+                        worktree_id: worktree.read(cx).id().to_proto(),
+                        definition: Some(definition.to_proto()),
+                    }));
                 let ssh_client = ssh.ssh_client.clone();
 
                 cx.spawn(async move |_, cx| {
@@ -265,14 +267,14 @@ impl DapStore {
                         None,
                     );
 
-                    Ok(DebugAdapterBinary {
+                    Ok(dbg!(DebugAdapterBinary {
                         command: Some(program),
                         arguments: args,
                         envs: HashMap::default(),
                         cwd: None,
                         connection,
                         request_args: binary.request_args,
-                    })
+                    }))
                 })
             }
             DapStoreMode::Collab => {

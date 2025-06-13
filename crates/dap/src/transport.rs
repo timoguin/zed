@@ -3,8 +3,13 @@ use dap_types::{
     ErrorResponse,
     messages::{Message, Response},
 };
-use futures::{AsyncRead, AsyncReadExt as _, AsyncWrite, FutureExt as _, channel::oneshot, select};
-use gpui::{AppContext as _, AsyncApp, Task};
+use futures::{
+    AsyncRead, AsyncReadExt as _, AsyncWrite, FutureExt as _,
+    channel::oneshot,
+    io::{ReadHalf, WriteHalf},
+    select,
+};
+use gpui::{App, AppContext as _, AsyncApp, Task};
 use settings::Settings as _;
 use smallvec::SmallVec;
 use smol::{
@@ -125,8 +130,9 @@ pub(crate) struct TransportDelegate {
     log_handlers: LogHandlers,
     current_requests: Requests,
     pending_requests: Requests,
-    transport: Transport,
+    binary: DebugAdapterBinary,
     server_tx: Arc<Mutex<Option<Sender<Message>>>>,
+    transport: Option<Transport>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -135,24 +141,25 @@ impl TransportDelegate {
         binary: &DebugAdapterBinary,
         cx: AsyncApp,
     ) -> Result<((Receiver<Message>, Sender<Message>), Self)> {
-        let (transport_pipes, transport) = Transport::start(binary, cx.clone()).await?;
         let mut this = Self {
-            transport,
+            binary: binary.clone(),
+            transport: None,
             server_tx: Default::default(),
             log_handlers: Default::default(),
             current_requests: Default::default(),
             pending_requests: Default::default(),
             _tasks: Vec::new(),
         };
-        let messages = this.start_handlers(transport_pipes, cx).await?;
+        let messages = this.start_handlers(cx).await?;
         Ok((messages, this))
     }
 
     async fn start_handlers(
         &mut self,
-        mut params: TransportPipe,
         cx: AsyncApp,
     ) -> Result<(Receiver<Message>, Sender<Message>)> {
+        let (mut transport_pipe, transport) = Transport::start(&self.binary, cx.clone()).await?;
+        self.transport = Some(transport);
         let (client_tx, server_rx) = unbounded::<Message>();
         let (server_tx, client_rx) = unbounded::<Message>();
 
@@ -169,7 +176,7 @@ impl TransportDelegate {
 
         let adapter_log_handler = log_handler.clone();
         cx.update(|cx| {
-            if let Some(stdout) = params.stdout.take() {
+            if let Some(stdout) = transport_pipe.stdout.take() {
                 self._tasks.push(cx.background_spawn(async move {
                     match Self::handle_adapter_log(stdout, adapter_log_handler).await {
                         ConnectionResult::Timeout => {
@@ -185,30 +192,7 @@ impl TransportDelegate {
                     }
                 }));
             }
-
-            let pending_requests = self.pending_requests.clone();
-            let output_log_handler = log_handler.clone();
-            self._tasks.push(cx.background_spawn(async move {
-                match Self::handle_output(
-                    params.output,
-                    client_tx,
-                    pending_requests.clone(),
-                    output_log_handler,
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(e) => log::error!("Error handling debugger output: {e}"),
-                }
-                let mut pending_requests = pending_requests.lock().await;
-                pending_requests.drain().for_each(|(_, request)| {
-                    request
-                        .send(Err(anyhow!("debugger shutdown unexpectedly")))
-                        .ok();
-                });
-            }));
-
-            if let Some(stderr) = params.stderr.take() {
+            if let Some(stderr) = transport_pipe.stderr.take() {
                 let log_handlers = self.log_handlers.clone();
                 self._tasks.push(cx.background_spawn(async move {
                     match Self::handle_error(stderr, log_handlers).await {
@@ -226,23 +210,15 @@ impl TransportDelegate {
                 }));
             }
 
-            let current_requests = self.current_requests.clone();
-            let pending_requests = self.pending_requests.clone();
-            let log_handler = log_handler.clone();
-            self._tasks.push(cx.background_spawn(async move {
-                match Self::handle_input(
-                    params.input,
-                    client_rx,
-                    current_requests,
-                    pending_requests,
-                    log_handler,
-                )
-                .await
-                {
-                    Ok(()) => {}
-                    Err(e) => log::error!("Error handling debugger input: {e}"),
-                }
-            }));
+            self._tasks.push(self.run_input_output(
+                transport_pipe.input,
+                transport_pipe.output,
+                client_tx,
+                client_rx,
+                log_handler,
+                transport,
+                cx,
+            ));
         })?;
 
         {
@@ -251,6 +227,65 @@ impl TransportDelegate {
         }
 
         Ok((server_rx, server_tx))
+    }
+
+    fn run_input_output(
+        &self,
+        input: Box<dyn AsyncWrite + Unpin + Send + 'static>,
+        output: Box<dyn AsyncRead + Unpin + Send + 'static>,
+        log_handler: Option<LogHandlers>,
+        client_tx: Sender<Message>,
+        client_rx: Receiver<Message>,
+        transport: Transport,
+        cx: &mut App,
+    ) -> Task<()> {
+        let pending_requests = self.pending_requests.clone();
+        let output_log_handler = log_handler.clone();
+
+        let current_requests = self.current_requests.clone();
+        let pending_requests = self.pending_requests.clone();
+        let log_handler = log_handler.clone();
+        let input_task = cx.background_spawn(async move {
+            match Self::handle_input(
+                input,
+                client_rx,
+                current_requests,
+                pending_requests,
+                log_handler,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) => log::error!("Error handling debugger input: {e}"),
+            }
+        });
+
+        cx.spawn(async move |cx| {
+            match cx
+                .background_spawn(Self::handle_output(
+                    output,
+                    client_tx,
+                    pending_requests.clone(),
+                    output_log_handler,
+                ))
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    let (tx, rx) = transport.reconnect().await?;
+                    drop(input_task);
+                    self.run_input_output(tx, rx, log_handler, client_tx, client_rx, transport, cx)
+                    log::error!("Error handling debugger output: {e}")
+                }
+            }
+            let mut pending_requests = pending_requests.lock().await;
+            pending_requests.drain().for_each(|(_, request)| {
+                request
+                    .send(Err(anyhow!("debugger shutdown unexpectedly")))
+                    .ok();
+            });
+            drop(input_task);
+        });
     }
 
     pub(crate) async fn add_pending_request(
@@ -474,11 +509,11 @@ impl TransportDelegate {
             match reader
                 .read_line(buffer)
                 .await
-                .with_context(|| "reading a message from server")
+                // .with_context(|| "reading a message from server")
             {
                 Ok(0) => return ConnectionResult::ConnectionReset,
                 Ok(_) => {}
-                Err(e) => return ConnectionResult::Result(Err(e)),
+                Err(e) => return ConnectionResult::Result(Err(e.into())),
             };
 
             if buffer == "\r\n" {
@@ -511,6 +546,7 @@ impl TransportDelegate {
             Ok(str) => str,
             Err(e) => return ConnectionResult::Result(Err(e)),
         };
+        dbg!(&message_str);
 
         if let Some(log_handlers) = log_handlers {
             for (kind, log_handler) in log_handlers.lock().iter_mut() {
@@ -538,7 +574,7 @@ impl TransportDelegate {
         current_requests.clear();
         pending_requests.clear();
 
-        self.transport.kill().await;
+        self.transport.as_ref().unwrap().kill().await;
 
         drop(current_requests);
         drop(pending_requests);
@@ -549,11 +585,11 @@ impl TransportDelegate {
     }
 
     pub fn has_adapter_logs(&self) -> bool {
-        self.transport.has_adapter_logs()
+        self.transport.as_ref().unwrap().has_adapter_logs()
     }
 
     pub fn transport(&self) -> &Transport {
-        &self.transport
+        self.transport.as_ref().unwrap()
     }
 
     pub fn add_log_handler<F>(&self, f: F, kind: LogKind)
@@ -569,7 +605,7 @@ pub struct TcpTransport {
     pub port: u16,
     pub host: Ipv4Addr,
     pub timeout: u64,
-    process: Option<Mutex<Child>>,
+    process: Arc<parking_lot::Mutex<Option<Child>>>,
 }
 
 impl TcpTransport {
@@ -616,25 +652,60 @@ impl TcpTransport {
             None
         };
 
-        let address = SocketAddrV4::new(host, port);
-
         let timeout = connection_args.timeout.unwrap_or_else(|| {
             cx.update(|cx| DebuggerSettings::get_global(cx).timeout)
                 .unwrap_or(2000u64)
         });
 
-        let (mut process, (rx, tx)) = select! {
-            _ = cx.background_executor().timer(Duration::from_millis(timeout)).fuse() => {
+        let stdout = process.as_mut().and_then(|p| p.stdout.take());
+        let stderr = process.as_mut().and_then(|p| p.stderr.take());
+        let this = Self {
+            port,
+            host,
+            process: Arc::new(parking_lot::Mutex::new(process)),
+            timeout,
+        };
+
+        let (rx, tx) = this.reconnect(cx).await?;
+
+        log::info!(
+            "Debug adapter has connected to TCP server {}:{}",
+            host,
+            port
+        );
+
+        let pipe = TransportPipe::new(
+            Box::new(tx),
+            Box::new(BufReader::new(rx)),
+            stdout.map(|s| Box::new(s) as Box<dyn AsyncRead + Unpin + Send>),
+            stderr.map(|s| Box::new(s) as Box<dyn AsyncRead + Unpin + Send>),
+        );
+
+        Ok((pipe, this))
+    }
+
+    async fn reconnect(&self, cx: AsyncApp) -> Result<(ReadHalf<TcpStream>, WriteHalf<TcpStream>)> {
+        let host = self.host;
+        let port = self.port;
+        let address = SocketAddrV4::new(host, port);
+        let process = self.process.clone();
+
+        select! {
+            _ = cx.background_executor().timer(Duration::from_millis(self.timeout)).fuse() => {
                 anyhow::bail!("Connection to TCP DAP timeout {host}:{port}");
             },
             result = cx.spawn(async move |cx| {
                 loop {
                     match TcpStream::connect(address).await {
-                        Ok(stream) => return Ok((process, stream.split())),
+                        Ok(stream) => {
+                            return Ok(stream.split())
+                        },
+
                         Err(_) => {
-                            if let Some(p) = &mut process {
+                            let mut guard = process.lock();
+                            if let Some(p) = &mut *guard {
                                 if let Ok(Some(_)) = p.try_status() {
-                                    let output = process.take().unwrap().into_inner().output().await?;
+                                    let output = guard.take().unwrap().into_inner().output().await?;
                                     let output = if output.stderr.is_empty() {
                                         String::from_utf8_lossy(&output.stdout).to_string()
                                     } else {
@@ -648,32 +719,8 @@ impl TcpTransport {
                         }
                     }
                 }
-            }).fuse() => result?
-        };
-
-        log::info!(
-            "Debug adapter has connected to TCP server {}:{}",
-            host,
-            port
-        );
-        let stdout = process.as_mut().and_then(|p| p.stdout.take());
-        let stderr = process.as_mut().and_then(|p| p.stderr.take());
-
-        let this = Self {
-            port,
-            host,
-            process: process.map(Mutex::new),
-            timeout,
-        };
-
-        let pipe = TransportPipe::new(
-            Box::new(tx),
-            Box::new(BufReader::new(rx)),
-            stdout.map(|s| Box::new(s) as Box<dyn AsyncRead + Unpin + Send>),
-            stderr.map(|s| Box::new(s) as Box<dyn AsyncRead + Unpin + Send>),
-        );
-
-        Ok((pipe, this))
+            }).fuse() => result,
+        }
     }
 
     fn has_adapter_logs(&self) -> bool {
@@ -681,17 +728,17 @@ impl TcpTransport {
     }
 
     async fn kill(&self) {
-        if let Some(process) = &self.process {
-            let mut process = process.lock().await;
-            Child::kill(&mut process);
+        let mut guard = self.process.lock();
+        if let Some(process) = guard.as_mut() {
+            Child::kill(process);
         }
     }
 }
 
 impl Drop for TcpTransport {
     fn drop(&mut self) {
-        if let Some(mut p) = self.process.take() {
-            p.get_mut().kill();
+        if let Some(p) = self.process.lock().as_mut().take() {
+            p.kill();
         }
     }
 }
