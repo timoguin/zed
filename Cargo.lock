@@ -14420,6 +14420,7 @@ dependencies = [
  "paths",
  "project",
  "schemars",
+ "search",
  "serde",
  "settings",
  "theme",
