@@ -216,7 +216,7 @@ const MEGABYTE: usize = 1024 * 1024;
 
 thread_local! {
     pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(ELEMENT_ARENA_MIN_SIZE));
-    pub(crate) static ELEMENT_ARENA_UNDERUSE_COUNT: RefCell<usize> = RefCell::new(0);
+    pub(crate) static ELEMENT_ARENA_UNDERUSE_COUNT: RefCell<usize> = const { RefCell::new(0) };
 }
 
 pub(crate) type FocusMap = RwLock<SlotMap<FocusId, AtomicUsize>>;
