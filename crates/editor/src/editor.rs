@@ -1797,8 +1797,7 @@ impl Editor {
                                 editor.tasks_update_task =
                                     Some(editor.refresh_runnables(window, cx));
                             }
-                            editor.pull_diagnostics(None, window, cx);
-                            editor.refresh_colors(window, cx);
+                            editor.update_lsp_data(None, window, cx);
                         }
                         project::Event::SnippetEdit(id, snippet_edits) => {
                             if let Some(buffer) = editor.buffer.read(cx).buffer(*id) {
@@ -2210,8 +2209,7 @@ impl Editor {
 
             editor.minimap =
                 editor.create_minimap(EditorSettings::get_global(cx).minimap, window, cx);
-            editor.pull_diagnostics(None, window, cx);
-            editor.refresh_colors(window, cx);
+            editor.update_lsp_data(None, window, cx);
         }
 
         editor.report_editor_event("Editor Opened", None, cx);
@@ -16259,7 +16257,12 @@ impl Editor {
         Some(())
     }
 
-    fn refresh_colors(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn refresh_colors(
+        &mut self,
+        buffer_id: Option<BufferId>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.mode().is_full() {
             return;
         }
@@ -19094,10 +19097,7 @@ impl Editor {
                         });
                         if edited_buffer.read(cx).file().is_some() {
                             let buffer_id = edited_buffer.read(cx).remote_id();
-                            self.pull_diagnostics(Some(buffer_id), window, cx);
-                            if *singleton_buffer_edited {
-                                self.refresh_colors(window, cx);
-                            }
+                            self.update_lsp_data(Some(buffer_id), window, cx);
                         }
                     }
                 }
@@ -19165,6 +19165,7 @@ impl Editor {
                         .detach();
                     }
                 }
+                self.update_lsp_data(Some(buffer_id), window, cx);
                 cx.emit(EditorEvent::ExcerptsAdded {
                     buffer: buffer.clone(),
                     predecessor: *predecessor,
@@ -19184,7 +19185,8 @@ impl Editor {
                 cx.emit(EditorEvent::ExcerptsRemoved {
                     ids: ids.clone(),
                     removed_buffer_ids: removed_buffer_ids.clone(),
-                })
+                });
+                // TODO kb invalidate colors
             }
             multi_buffer::Event::ExcerptsEdited {
                 excerpt_ids,
@@ -19195,7 +19197,7 @@ impl Editor {
                 });
                 cx.emit(EditorEvent::ExcerptsEdited {
                     ids: excerpt_ids.clone(),
-                })
+                });
             }
             multi_buffer::Event::ExcerptsExpanded { ids } => {
                 self.refresh_inlay_hints(InlayHintRefreshReason::NewLinesShown, cx);
@@ -20223,6 +20225,16 @@ impl Editor {
         }
 
         self.read_scroll_position_from_db(item_id, workspace_id, window, cx);
+    }
+
+    fn update_lsp_data(
+        &mut self,
+        for_buffer: Option<BufferId>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pull_diagnostics(for_buffer, window, cx);
+        self.refresh_colors(for_buffer, window, cx);
     }
 }
 
