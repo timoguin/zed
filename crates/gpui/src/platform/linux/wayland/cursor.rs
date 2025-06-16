@@ -1,4 +1,5 @@
 use crate::Globals;
+use anyhow::Context as _;
 use util::ResultExt;
 
 use wayland_client::Connection;
@@ -7,7 +8,7 @@ use wayland_client::protocol::{wl_pointer::WlPointer, wl_shm::WlShm};
 use wayland_cursor::{CursorImageBuffer, CursorTheme};
 
 pub(crate) struct Cursor {
-    theme: Option<CursorTheme>,
+    loaded_theme: Option<LoadedTheme>,
     theme_name: Option<String>,
     theme_size: u32,
     surface: WlSurface,
@@ -16,61 +17,66 @@ pub(crate) struct Cursor {
     connection: Connection,
 }
 
+pub(crate) struct LoadedTheme {
+    theme: CursorTheme,
+    name: Option<String>,
+    size: u32,
+}
+
 impl Drop for Cursor {
     fn drop(&mut self) {
-        self.theme.take();
+        self.loaded_theme.take();
         self.surface.destroy();
     }
 }
 
 impl Cursor {
     pub fn new(connection: &Connection, globals: &Globals, size: u32) -> Self {
-        Self {
-            theme: CursorTheme::load(&connection, globals.shm.clone(), size).log_err(),
+        let mut this = Self {
+            loaded_theme: None,
             theme_name: None,
             theme_size: size,
             surface: globals.compositor.create_surface(&globals.qh, ()),
             shm: globals.shm.clone(),
             connection: connection.clone(),
             size,
+        };
+        this
+    }
+
+    fn reload_theme(&mut self) {
+        if let Some(loaded_theme) = self.loaded_theme.as_ref() {
+            if loaded_theme.name == self.theme_name && loaded_theme.size == self.theme_size {
+                return;
+            }
+        }
+        let result = if let Some(theme_name) = self.theme_name.as_ref() {
+            CursorTheme::load_from_name(
+                &self.connection,
+                self.shm.clone(),
+                theme_name,
+                self.theme_size,
+            )
+        } else {
+            CursorTheme::load(&self.connection, self.shm.clone(), self.theme_size)
+        };
+        if let Some(theme) = result.context("Failed to load cursor theme").log_err() {
+            self.loaded_theme = Some(LoadedTheme {
+                theme,
+                name: self.theme_name.clone(),
+                size: self.theme_size,
+            });
         }
     }
 
-    pub fn set_theme(&mut self, theme_name: &str) {
-        if let Some(theme) = CursorTheme::load_from_name(
-            &self.connection,
-            self.shm.clone(),
-            theme_name,
-            self.theme_size,
-        )
-        .log_err()
-        {
-            self.theme = Some(theme);
-            self.theme_name = Some(theme_name.to_string());
-        } else if let Some(theme) =
-            CursorTheme::load(&self.connection, self.shm.clone(), self.theme_size).log_err()
-        {
-            self.theme = Some(theme);
-            self.theme_name = None;
-        }
+    pub fn set_theme(&mut self, theme_name: String) {
+        self.theme_name = Some(theme_name);
+        self.reload_theme();
     }
 
     fn set_theme_size(&mut self, theme_size: u32) {
-        self.theme = self
-            .theme_name
-            .as_ref()
-            .and_then(|name| {
-                CursorTheme::load_from_name(
-                    &self.connection,
-                    self.shm.clone(),
-                    name.as_str(),
-                    theme_size,
-                )
-                .log_err()
-            })
-            .or_else(|| {
-                CursorTheme::load(&self.connection, self.shm.clone(), theme_size).log_err()
-            });
+        self.theme_size = theme_size;
+        self.reload_theme();
     }
 
     pub fn set_size(&mut self, size: u32) {
@@ -87,7 +93,8 @@ impl Cursor {
     ) {
         self.set_theme_size(self.size * scale as u32);
 
-        if let Some(theme) = &mut self.theme {
+        if let Some(loaded_theme) = &mut self.loaded_theme {
+            let theme = &mut loaded_theme.theme;
             let mut buffer: Option<&CursorImageBuffer>;
 
             if let Some(cursor) = theme.get_cursor(&cursor_icon_name) {
