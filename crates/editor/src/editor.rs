@@ -19320,6 +19320,13 @@ impl Editor {
             }
         }
 
+        if self
+            .colors
+            .render_mode_updated(EditorSettings::get_global(cx).lsp_document_colors)
+        {
+            self.refresh_colors(false, None, None, window, cx);
+        }
+
         cx.notify();
     }
 
