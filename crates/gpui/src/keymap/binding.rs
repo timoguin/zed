@@ -118,6 +118,11 @@ impl KeyBinding {
     pub fn source(&self) -> Option<KeyBindingSourceIndex> {
         self.source
     }
+
+    /// Get the action input associated with the action for this binding
+    pub fn action_input(&self) -> Option<SharedString> {
+        self.action_input.clone()
+    }
 }
 
 impl std::fmt::Debug for KeyBinding {
