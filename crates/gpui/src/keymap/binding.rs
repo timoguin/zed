@@ -4,6 +4,7 @@ use collections::HashMap;
 
 use crate::{
     Action, InvalidKeystrokeError, KeyBindingContextPredicate, KeyBindingSourceIndex, Keystroke,
+    SharedString,
 };
 use smallvec::SmallVec;
 
@@ -13,6 +14,8 @@ pub struct KeyBinding {
     pub(crate) keystrokes: SmallVec<[Keystroke; 2]>,
     pub(crate) context_predicate: Option<Rc<KeyBindingContextPredicate>>,
     pub(crate) source: Option<KeyBindingSourceIndex>,
+    /// The json input string used when building the keybinding, if any
+    pub(crate) action_input: Option<SharedString>,
 }
 
 impl Clone for KeyBinding {
@@ -22,6 +25,7 @@ impl Clone for KeyBinding {
             keystrokes: self.keystrokes.clone(),
             context_predicate: self.context_predicate.clone(),
             source: self.source.clone(),
+            action_input: self.action_input.clone(),
         }
     }
 }
@@ -34,7 +38,7 @@ impl KeyBinding {
         } else {
             None
         };
-        Self::load(keystrokes, Box::new(action), context_predicate, None).unwrap()
+        Self::load(keystrokes, Box::new(action), context_predicate, None, None).unwrap()
     }
 
     /// Load a keybinding from the given raw data.
@@ -43,6 +47,7 @@ impl KeyBinding {
         action: Box<dyn Action>,
         context_predicate: Option<Rc<KeyBindingContextPredicate>>,
         key_equivalents: Option<&HashMap<char, char>>,
+        action_input: Option<SharedString>,
     ) -> std::result::Result<Self, InvalidKeystrokeError> {
         let mut keystrokes: SmallVec<[Keystroke; 2]> = keystrokes
             .split_whitespace()
@@ -64,6 +69,7 @@ impl KeyBinding {
             action,
             context_predicate,
             source: None,
+            action_input,
         })
     }
 
