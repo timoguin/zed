@@ -7654,14 +7654,13 @@ impl LspStore {
         let uri = lsp::Uri::from_file_path(&abs_path)
             .ok()
             .with_context(|| format!("Failed to convert path to URI: {}", abs_path.display()))
-            .unwrap();
+            .log_err()?;
         let next_snapshot = buffer.text_snapshot();
         for language_server in language_servers {
             let language_server = language_server.clone();
 
             let buffer_snapshots = self
-                .as_local_mut()
-                .unwrap()
+                .as_local_mut()?
                 .buffer_snapshots
                 .get_mut(&buffer.remote_id())
                 .and_then(|m| m.get_mut(&language_server.server_id()))?;
@@ -10144,6 +10143,8 @@ impl LspStore {
                     source: completion.source,
                     documentation: None,
                     label: CodeLabel::default(),
+                    match_start: None,
+                    snippet_deduplication_key: None,
                     insert_text_mode: None,
                     icon_path: None,
                     confirm: None,
@@ -12848,6 +12849,8 @@ async fn populate_labels_for_completions(
                     source: completion.source,
                     icon_path: None,
                     confirm: None,
+                    match_start: None,
+                    snippet_deduplication_key: None,
                 });
             }
             None => {
@@ -12862,6 +12865,8 @@ async fn populate_labels_for_completions(
                     insert_text_mode: None,
                     icon_path: None,
                     confirm: None,
+                    match_start: None,
+                    snippet_deduplication_key: None,
                 });
             }
         }
